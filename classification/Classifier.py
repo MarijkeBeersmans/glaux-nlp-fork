@@ -1,20 +1,22 @@
 import numpy as np
-from transformers import AutoTokenizer, AutoModelForTokenClassification, AutoConfig, TrainingArguments, Trainer, DataCollatorForTokenClassification
+from transformers import AutoTokenizer, AutoModelForTokenClassification, AutoConfig, TrainingArguments, Trainer, DataCollatorForTokenClassification, IntervalStrategy, EarlyStoppingCallback
 from data.CONLLReader import CONLLReader
 import torch
 from argparse import ArgumentParser
 import json
 from tokenization import Tokenization
 from data import Datasets
+from datasets import load_metric
+from sklearn.metrics import classification_report
 
 class Classifier:
     
-    def __init__(self,transformer_path,model_dir,tokenizer_path,training_data=None,test_data=None,ignore_label=None,unknown_label=None,data_preset='CONLL',feature_cols=None):
+    def __init__(self,transformer_path,model_dir,tokenizer_path,training_data=None,eval_data=None,test_data=None,ignore_label=None,unknown_label=None,data_preset='CONLL',feature_cols=None, add_prefix_space=False):
         self.device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
         if tokenizer_path is None:
-            self.tokenizer = AutoTokenizer.from_pretrained(transformer_path)
+            self.tokenizer = AutoTokenizer.from_pretrained(transformer_path, add_prefix_space=add_prefix_space)
         else:
-            self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+            self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, add_prefix_space=add_prefix_space)
         self.prefix_subword_id = None
         if '▁' in self.tokenizer.vocab.keys():
             self.prefix_subword_id = self.tokenizer.convert_tokens_to_ids('▁')
@@ -29,6 +31,10 @@ class Classifier:
             self.test_data = self.reader.parse_conll(test_data)
         else:
             self.test_data = None
+        if eval_data is not None:
+            self.eval_data = self.reader.parse_conll(eval_data)
+        else:
+            self.eval_data = None
         self.ignore_label = ignore_label
         self.unknown_label = unknown_label
 
@@ -103,16 +109,80 @@ class Classifier:
         
         sentence['labels'] = enc_labels
         return sentence
+    
+    def flatten_list(self, nested_list):
+        flattened = []
+        for sublist in nested_list:
+            if isinstance(sublist, list):
+                flattened.extend(flatten_list(sublist))
+            else:
+                flattened.append(sublist)
+        return flattened
+    
+    
+    def compute_metrics(self, p, metric='sklearn'):
+        id2tag = self.config.id2label
+        #added compute_metrics for evaluation during training
+        predictions, labels = p
+        #select predicted index with maximum logit for each token
+        predictions = np.argmax(predictions, axis=2)
+        # Remove ignored index (special tokens)
+        true_predictions = [
+          [id2tag[p] for (p, l) in zip(prediction, label) if l != -100]
+          for prediction, label in zip(predictions, labels)
+        ]
+
+
+        true_labels = [
+          [id2tag[l] for (p, l) in zip(prediction, label) if l != -100]
+          for prediction, label in zip(predictions, labels)
+        ]
+        if metric == 'seqeval_ner':
+            metric = load_metric('seqeval')
+            results = metric.compute(predictions=true_predictions, references=true_labels)
+            return {
+              "precision": results["overall_precision"],
+              "recall": results['overall_recall'],
+              "f1": results["overall_f1"]
+        }
+        if metric == "sklearn":
+            results = classification_report([element for innerList in true_labels for element in innerList], [element for innerList in true_predictions for element in innerList], output_dict=True)
+            return {
+              "precision": results['macro avg']["precision"],
+              "recall": results['macro avg']["recall"],
+              "f1": results['macro avg']["f1-score"]
+        }
         
-    def train_classifier(self,output_model,train_dataset,tag2id,id2tag,epochs=3,batch_size=16,learning_rate=5e-5):        
+    def train_classifier(self,output_model,train_dataset, tag2id,id2tag,eval_dataset=None, 
+                          epochs=3,batch_size=16,learning_rate=5e-5, training_args=None):
+        
         data_collator = DataCollatorForTokenClassification(tokenizer=self.tokenizer)        
         self.config = AutoConfig.from_pretrained(self.transformer_path, num_labels=len(tag2id), id2label=id2tag, label2id=tag2id)
         self.classifier_model = AutoModelForTokenClassification.from_pretrained(self.transformer_path,config=self.config)
         
-        training_args = TrainingArguments(output_dir=output_model,num_train_epochs=epochs,per_device_train_batch_size=batch_size,learning_rate=learning_rate,save_strategy='no')
-        trainer = Trainer(model=self.classifier_model,args=training_args,train_dataset=train_dataset,tokenizer=self.tokenizer,data_collator=data_collator)
+        if training_args == None:
+            training_args = TrainingArguments(output_dir=output_model,num_train_epochs=epochs,per_device_train_batch_size=batch_size,learning_rate=learning_rate,save_strategy='no')
+        else:
+                            training_args = training_args
+        if eval_dataset == None:
+            trainer = Trainer(model=self.classifier_model,
+                              args=training_args,
+                              train_dataset=train_dataset,
+                              tokenizer=self.tokenizer,
+                              data_collator=data_collator)
+        else:
+            
+            trainer = Trainer(model=self.classifier_model,
+              args=training_args,
+              train_dataset=train_dataset,
+              eval_dataset=eval_dataset,
+              compute_metrics=self.compute_metrics,
+              tokenizer=self.tokenizer,
+              data_collator=data_collator,
+              callbacks = [EarlyStoppingCallback(early_stopping_patience=3)]
+              )
         trainer.train()
-        trainer.model.save_pretrained(save_directory=trainer.args.output_dir)
+#         trainer.model.save_pretrained(save_directory=trainer.args.output_dir)
             
     def predict(self,test_data,model_dir=None,batch_size=16,labelname='MISC'):        
         ##Only works when padding is set to the right!!! See below
