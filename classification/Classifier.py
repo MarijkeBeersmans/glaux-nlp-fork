@@ -110,6 +110,55 @@ class Classifier:
         sentence['labels'] = enc_labels
         return sentence
     
+    
+    def tokenize_and_align_labels(self, sentence, tag2id, last_subword=True, prefix_subword_id=None, labelname='MISC', is_tensor=False):
+        
+        tokenizer = self.tokenizer
+
+        encodings = tokenizer(sentence['tokens'], truncation=True, max_length=514, is_split_into_words=True, return_offsets_mapping=True)
+        wids = encodings.word_ids()
+        
+        labels = sentence[labelname]
+        # tokens = sentence['tokens']
+
+        if is_tensor:
+            offset = offset[0]
+            input_ids = input_ids[0]
+
+        # valid_subwords = get_valid_subwords(offset,input_ids,last_subword=last_subword,prefix_subword_id=prefix_subword_id, tokens=tokens)
+
+        # if last_subword
+
+        enc_labels = []
+
+        label_idx = 0
+
+        for index, wid in enumerate(wids):
+            if wid == None: #BOS and EOS tokens of the encoded sentence get wid None
+                enc_labels.append(-100)
+            else:
+                if last_subword == False:
+                    if wid != wids[index-1]:  # Only label the first token of a given word.
+                        if not (self.ignore_label is not None and self.ignore_label==labels[label_idx]):
+                            enc_labels.append(tag2id[labels[label_idx]])
+                        else:
+                            enc_labels.append(-100)
+                        label_idx = label_idx + 1
+                    else:
+                        enc_labels.append(-100)
+                else:
+                    if wid != wids[index+1]: # Only label the last token of a given word.
+                        if not (self.ignore_label is not None and self.ignore_label==labels[label_idx]):
+                            enc_labels.append(tag2id[labels[label_idx]])
+                        else:
+                            enc_labels.append(-100)
+                        label_idx = label_idx + 1
+                    else:
+                        enc_labels.append(-100)
+
+        encodings['labels'] = enc_labels
+        return encodings
+    
     def flatten_list(self, nested_list):
         flattened = []
         for sublist in nested_list:
