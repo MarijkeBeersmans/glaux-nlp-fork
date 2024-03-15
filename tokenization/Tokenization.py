@@ -1,8 +1,8 @@
 import re
 import unicodedata
 
-def tokenize_sentence(sentence, tokenizer, return_tensors=None):
-    encodings = tokenizer(sentence['tokens'], truncation=True, max_length=512, is_split_into_words=True, return_offsets_mapping=True,return_tensors=return_tensors)
+def tokenize_sentence(sentence, tokenizer, return_tensors=None, max_length=512):
+    encodings = tokenizer(sentence['tokens'], truncation=True, max_length=max_length, is_split_into_words=True, return_offsets_mapping=True,return_tensors=return_tensors)
     encodings['subword_ids'] = encodings.word_ids()
     return encodings
 

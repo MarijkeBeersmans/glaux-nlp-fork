@@ -11,12 +11,12 @@ from sklearn.metrics import classification_report
 
 class Classifier:
     
-    def __init__(self,transformer_path,model_dir,tokenizer_path,training_data=None,eval_data=None,test_data=None,ignore_label=None,unknown_label=None,data_preset='CONLL',feature_cols=None, add_prefix_space=False):
+    def __init__(self,transformer_path,model_dir,tokenizer_path,training_data=None,eval_data=None,test_data=None,ignore_label=None,unknown_label=None,data_preset='CONLL',feature_cols=None, add_prefix_space=False, max_length=512):
         self.device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
         if tokenizer_path is None:
-            self.tokenizer = AutoTokenizer.from_pretrained(transformer_path, add_prefix_space=add_prefix_space)
+            self.tokenizer = AutoTokenizer.from_pretrained(transformer_path, add_prefix_space=add_prefix_space, max_length=max_length)
         else:
-            self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, add_prefix_space=add_prefix_space)
+            self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, add_prefix_space=add_prefix_space, max_length=max_length)
         self.prefix_subword_id = None
         if '▁' in self.tokenizer.vocab.keys():
             self.prefix_subword_id = self.tokenizer.convert_tokens_to_ids('▁')
@@ -169,6 +169,10 @@ class Classifier:
         labels = sentence[labelname]
         
         valid_subwords = self.get_valid_subwords(sentence['subword_ids'],last_subword=last_subword)
+        try:
+            assert len([x for x in valid_subwords if x == True]) == len(sentence['tokens'])
+        except AssertionError:
+            print(sentence)
         
         enc_labels = np.ones(len(valid_subwords),dtype=int) * - 100
         
@@ -188,54 +192,66 @@ class Classifier:
         sentence['labels'] = enc_labels
         return sentence
     
-    
-    def tokenize_and_align_labels(self, sentence, tag2id, last_subword=True, prefix_subword_id=None, labelname='MISC', is_tensor=False):
-        
-        tokenizer = self.tokenizer
-
-        encodings = tokenizer(sentence['tokens'], truncation=True, max_length=514, is_split_into_words=True, return_offsets_mapping=True)
-        wids = encodings.word_ids()
-        
-        labels = sentence[labelname]
-        # tokens = sentence['tokens']
-
-        if is_tensor:
-            offset = offset[0]
-            input_ids = input_ids[0]
-
-        # valid_subwords = get_valid_subwords(offset,input_ids,last_subword=last_subword,prefix_subword_id=prefix_subword_id, tokens=tokens)
-
-        # if last_subword
-
-        enc_labels = []
-
-        label_idx = 0
-
-        for index, wid in enumerate(wids):
-            if wid == None: #BOS and EOS tokens of the encoded sentence get wid None
-                enc_labels.append(-100)
+    def align_token_type_ids(self, sentence):
+        token_type_ids = sentence['token_type_ids']
+        new_token_type_ids = []
+        for subword_id in sentence['subword_ids']:
+            if subword_id != None:
+                new_token_type_ids.append(token_type_ids[subword_id])
             else:
-                if last_subword == False:
-                    if wid != wids[index-1]:  # Only label the first token of a given word.
-                        if not (self.ignore_label is not None and self.ignore_label==labels[label_idx]):
-                            enc_labels.append(tag2id[labels[label_idx]])
-                        else:
-                            enc_labels.append(-100)
-                        label_idx = label_idx + 1
-                    else:
-                        enc_labels.append(-100)
-                else:
-                    if wid != wids[index+1]: # Only label the last token of a given word.
-                        if not (self.ignore_label is not None and self.ignore_label==labels[label_idx]):
-                            enc_labels.append(tag2id[labels[label_idx]])
-                        else:
-                            enc_labels.append(-100)
-                        label_idx = label_idx + 1
-                    else:
-                        enc_labels.append(-100)
+                new_token_type_ids.append(0)
+        
+        sentence['token_type_original'] = token_type_ids
+        sentence['token_type_ids'] = new_token_type_ids
+        return sentence
+    
+#     def tokenize_and_align_labels(self, sentence, tag2id, last_subword=True, prefix_subword_id=None, labelname='MISC', is_tensor=False):
+        
+#         tokenizer = self.tokenizer
 
-        encodings['labels'] = enc_labels
-        return encodings
+#         encodings = tokenizer(sentence['tokens'], truncation=True, max_length=514, is_split_into_words=True, return_offsets_mapping=True)
+#         wids = encodings.word_ids()
+        
+#         labels = sentence[labelname]
+#         # tokens = sentence['tokens']
+
+#         if is_tensor:
+#             offset = offset[0]
+#             input_ids = input_ids[0]
+
+#         # valid_subwords = get_valid_subwords(offset,input_ids,last_subword=last_subword,prefix_subword_id=prefix_subword_id, tokens=tokens)
+
+#         # if last_subword
+
+#         enc_labels = []
+
+#         label_idx = 0
+
+#         for index, wid in enumerate(wids):
+#             if wid == None: #BOS and EOS tokens of the encoded sentence get wid None
+#                 enc_labels.append(-100)
+#             else:
+#                 if last_subword == False:
+#                     if wid != wids[index-1]:  # Only label the first token of a given word.
+#                         if not (self.ignore_label is not None and self.ignore_label==labels[label_idx]):
+#                             enc_labels.append(tag2id[labels[label_idx]])
+#                         else:
+#                             enc_labels.append(-100)
+#                         label_idx = label_idx + 1
+#                     else:
+#                         enc_labels.append(-100)
+#                 else:
+#                     if wid != wids[index+1]: # Only label the last token of a given word.
+#                         if not (self.ignore_label is not None and self.ignore_label==labels[label_idx]):
+#                             enc_labels.append(tag2id[labels[label_idx]])
+#                         else:
+#                             enc_labels.append(-100)
+#                         label_idx = label_idx + 1
+#                     else:
+#                         enc_labels.append(-100)
+
+#         encodings['labels'] = enc_labels
+#         return encodings
     
     def flatten_list(self, nested_list):
         flattened = []
@@ -311,7 +327,7 @@ class Classifier:
         trainer.train()
 #         trainer.model.save_pretrained(save_directory=trainer.args.output_dir)
             
-    def predict(self,test_data,model_dir=None,batch_size=16,labelname='MISC'):        
+    def predict(self,test_data,model_dir=None,batch_size=16,labelname='MISC', max_length=512):        
         ##Only works when padding is set to the right!!! See below
         self.classifier_model = AutoModelForTokenClassification.from_pretrained(model_dir)
         self.config = AutoConfig.from_pretrained(model_dir)
@@ -323,7 +339,7 @@ class Classifier:
         
         test_data = test_data.map(self.align_labels,fn_kwargs={"tag2id":tag2id,"labelname":labelname})
         
-        data_collator = DataCollatorForTokenClassification(tokenizer=self.tokenizer)
+        data_collator = DataCollatorForTokenClassification(tokenizer=self.tokenizer, max_length=max_length)
         training_args = TrainingArguments(output_dir=self.model_dir,per_device_eval_batch_size=batch_size)
         trainer = Trainer(model=self.classifier_model,args=training_args,tokenizer=self.tokenizer,data_collator=data_collator)
         
@@ -333,7 +349,7 @@ class Classifier:
         # This only works when padding is set to the right, since the padded predictions will be longer than valid_subword
         all_preds = []
         for sent_no, sent in enumerate(test_data):
-            valid_subwords = self.get_valid_subwords(sent['offset_mapping'],sent['input_ids'],prefix_subword_id=self.prefix_subword_id)
+            valid_subwords = self.get_valid_subwords(sent['subword_ids'])
             for subword_no, valid_subword in enumerate(valid_subwords):
                 if valid_subword:
                     # If a (sub)word has the label defined by ignore_label, it is also set to -100 with classifier.align_labels, even though it is counted as a valid subword
