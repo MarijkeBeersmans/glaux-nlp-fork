@@ -10,10 +10,11 @@ from tokenization import Tokenization
 from data import Datasets
 from datasets import load_metric
 from sklearn.metrics import classification_report
+import copy
 
 class Classifier:
     
-    def __init__(self,transformer_path,model_dir,tokenizer_path,training_data=None,eval_data=None,test_data=None,ignore_label=None,unknown_label=None,data_preset='CONLL',feature_cols=None, add_prefix_space=False, max_length=512):
+    def __init__(self,transformer_path,model_dir,tokenizer_path,training_data=None,eval_data=None,test_data=None,ignore_label=None,unknown_label=None,data_preset='CONLL',feature_cols=None, add_prefix_space=False, max_length=512, monitor_metric='sklearn'):
         self.device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
         if tokenizer_path is None:
             self.tokenizer = AutoTokenizer.from_pretrained(transformer_path, add_prefix_space=add_prefix_space, max_length=max_length)
@@ -39,11 +40,14 @@ class Classifier:
             self.eval_data = None
         self.ignore_label = ignore_label
         self.unknown_label = unknown_label
+        self.monitor_metric = monitor_metric
     
-    def model_init(self, tag2id, id2tag):
+    def model_init(self):
+        _, tags = self.reader.read_tags('MISC', self.training_data, in_feats=False,return_wids=False)
+        tag2id, id2tag = self.id_label_mappings(tags)
         model = AutoModelForTokenClassification.from_pretrained(self.transformer_path, 
                                                               num_labels=len(tag2id),
-                                                              label2id=tag2id
+                                                              label2id=tag2id,
                                                               id2label=id2tag
                                                              )
         model.config.start_token_id = self.tokenizer.cls_token_id
@@ -233,7 +237,8 @@ class Classifier:
         return flattened
     
     
-    def compute_metrics(self, p, metric='sklearn'):
+    def compute_metrics(self, p):
+        metric=self.monitor_metric
         id2tag = self.config.id2label
         #added compute_metrics for evaluation during training
         predictions, labels = p
@@ -265,16 +270,21 @@ class Classifier:
               "recall": results['macro avg']["recall"],
               "f1": results['macro avg']["f1-score"]
         }
+    def compute_objective(self, metrics):
+        metrics = copy.deepcopy(metrics)
+        f1 = metrics.pop("eval_f1", None)
+        return f1 
         
     def train_classifier(self,output_model,train_dataset, tag2id,id2tag,eval_dataset=None, 
-                          epochs=3,batch_size=16,learning_rate=5e-5, training_args=None, resume_from_checkpoint=None, monitor_metric='sklearn', do_hypopt=None):
+                          epochs=3,batch_size=16,learning_rate=5e-5, training_args=None, resume_from_checkpoint=None, do_hypopt=False, hypopt_num=10):
         
         data_collator = DataCollatorForTokenClassification(tokenizer=self.tokenizer)        
         self.config = AutoConfig.from_pretrained(self.transformer_path, num_labels=len(tag2id), id2label=id2tag, label2id=tag2id)
         self.classifier_model = AutoModelForTokenClassification.from_pretrained(self.transformer_path,config=self.config)
-        
+        base_trianing_args = TrainingArguments(output_dir=output_model,num_train_epochs=epochs,per_device_train_batch_size=batch_size,learning_rate=learning_rate,save_strategy='no')
+
         if training_args == None:
-            training_args = TrainingArguments(output_dir=output_model,num_train_epochs=epochs,per_device_train_batch_size=batch_size,learning_rate=learning_rate,save_strategy='no')
+            training_args = base_trianing_args
         else:
             training_args = training_args
         if eval_dataset == None:
@@ -284,50 +294,51 @@ class Classifier:
                               tokenizer=self.tokenizer,
                               data_collator=data_collator)
         else:
-            if do_hypopt == None:
+            if do_hypopt == False:
                 trainer = Trainer(model=self.classifier_model,
                 args=training_args,
                 train_dataset=train_dataset,
                 eval_dataset=eval_dataset,
-                compute_metrics=self.compute_metrics(metric=monitor_metric),
+                compute_metrics=self.compute_metrics,
                 tokenizer=self.tokenizer,
                 data_collator=data_collator,
                 callbacks = [EarlyStoppingCallback(early_stopping_patience=3)]
                 )
             else:
-                assert type(do_hypopt) == dict
                 trainer = Trainer(
-                    model=self.model_init(tag2id, id2tag),
-                    args=training_args,
+                    model=None,
+                    args=base_trianing_args,
                     train_dataset=train_dataset,
                     eval_dataset=eval_dataset,
-                    compute_metrics=self.compute_metrics(metric=monitor_metric),
+                    compute_metrics=self.compute_metrics,
                     tokenizer=self.tokenizer,
                     data_collator=data_collator,
+                    model_init = self.model_init
                 )
-
                 best_trial = trainer.hyperparameter_search(
-                    # need to fix that this also works with other backends
                     direction="maximize",
                     backend="wandb",
                     hp_space=do_hypopt,
-                    n_trials=10,
-                )
+                    n_trials=hypopt_num,
+                    compute_objective=self.compute_objective)
                 
-                for key, value in best_trial['hyperparameters'].items():
+                print(f'finished hypopt search with best params {best_trial}')
+
+                for key, value in best_trial.hyperparameters.items():
+                    print(key, value)
                     setattr(training_args, key, value)
 
                 trainer = Trainer(model=self.classifier_model,
                 args=training_args,
                 train_dataset=train_dataset,
                 eval_dataset=eval_dataset,
-                compute_metrics=self.compute_metrics(metric=monitor_metric),
+                compute_metrics=self.compute_metrics,
                 tokenizer=self.tokenizer,
                 data_collator=data_collator,
                 )
         
         trainer.train(resume_from_checkpoint=resume_from_checkpoint)
-        trainer.model.save_pretrained(save_directory=trainer.args.output_dir)
+        # trainer.model.save_pretrained(save_directory=trainer.args.output_dir)
             
     def predict(self,test_data,model_dir=None,batch_size=16,labelname='MISC', max_length=512):        
         ##Only works when padding is set to the right!!! See below
