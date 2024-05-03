@@ -24,11 +24,19 @@ class CONLLReader:
         else:
             self.feature_cols = feature_cols
     
-    def parse_conll(self,filename):
-        file = open(filename,encoding='utf-8')
-        raw_text = file.read().strip()
-        raw_sents = re.split(r'\n\n', raw_text)
-        return raw_sents
+
+    def parse_conll(self, filename):
+        try:
+            with open(filename, encoding='utf-8') as file:
+                raw_text = file.read().strip()
+                raw_sents = re.split(r'\n\n', raw_text)
+                return raw_sents
+        except FileNotFoundError:
+            print(f"File '{filename}' not found.")
+            return None
+        except Exception as e:
+            print("An error occurred:", e)
+            return None
     
     def read_tags(self, feature, data, in_feats=False, return_wids=True, return_tokens=True, return_tags=True):
         # Reads the values for a given feature (UPOS, XPOS or morphological) from the training set, as well as the wids and forms

@@ -1,7 +1,9 @@
 import numpy as np
+import sys, os
+sys.path.append('/home/pricie/marijkeb/notebooks/glaux-nlp-fork')
+import torch
 from transformers import AutoTokenizer, AutoModelForTokenClassification, AutoConfig, TrainingArguments, Trainer, DataCollatorForTokenClassification, IntervalStrategy, EarlyStoppingCallback
 from data.CONLLReader import CONLLReader
-import torch
 from argparse import ArgumentParser
 import json
 from tokenization import Tokenization
@@ -37,6 +39,17 @@ class Classifier:
             self.eval_data = None
         self.ignore_label = ignore_label
         self.unknown_label = unknown_label
+    
+    def model_init(self, tag2id, id2tag):
+        model = AutoModelForTokenClassification.from_pretrained(self.transformer_path, 
+                                                              num_labels=len(tag2id),
+                                                              label2id=tag2id
+                                                              id2label=id2tag
+                                                             )
+        model.config.start_token_id = self.tokenizer.cls_token_id
+        model.config.eos_token_id = self.tokenizer.sep_token_id
+        model.config.pad_token_id = self.tokenizer.pad_token_id
+        return model
 
     
     def id_label_mappings(self,tags):
@@ -172,7 +185,7 @@ class Classifier:
         try:
             assert len([x for x in valid_subwords if x == True]) == len(sentence['tokens'])
         except AssertionError:
-            print(sentence)
+            print(f'length of the valid_subwords ({len([x for x in valid_subwords if x == True])}) and lenght of the tokens {len(sentence["tokens"])} is not the same')
         
         enc_labels = np.ones(len(valid_subwords),dtype=int) * - 100
         
@@ -190,6 +203,10 @@ class Classifier:
                     enc_labels[n_subword] = tag2id[label]
         
         sentence['labels'] = enc_labels
+        try:
+            assert len(sentence['labels']) == len(sentence['input_ids'])
+        except AssertionError:
+            print(f'length of labels ({len(sentence["labels"])}) is not equal to length of input_ids ({len(sentence["input_ids"])})')
         return sentence
     
     def align_token_type_ids(self, sentence):
@@ -205,53 +222,6 @@ class Classifier:
         sentence['token_type_ids'] = new_token_type_ids
         return sentence
     
-#     def tokenize_and_align_labels(self, sentence, tag2id, last_subword=True, prefix_subword_id=None, labelname='MISC', is_tensor=False):
-        
-#         tokenizer = self.tokenizer
-
-#         encodings = tokenizer(sentence['tokens'], truncation=True, max_length=514, is_split_into_words=True, return_offsets_mapping=True)
-#         wids = encodings.word_ids()
-        
-#         labels = sentence[labelname]
-#         # tokens = sentence['tokens']
-
-#         if is_tensor:
-#             offset = offset[0]
-#             input_ids = input_ids[0]
-
-#         # valid_subwords = get_valid_subwords(offset,input_ids,last_subword=last_subword,prefix_subword_id=prefix_subword_id, tokens=tokens)
-
-#         # if last_subword
-
-#         enc_labels = []
-
-#         label_idx = 0
-
-#         for index, wid in enumerate(wids):
-#             if wid == None: #BOS and EOS tokens of the encoded sentence get wid None
-#                 enc_labels.append(-100)
-#             else:
-#                 if last_subword == False:
-#                     if wid != wids[index-1]:  # Only label the first token of a given word.
-#                         if not (self.ignore_label is not None and self.ignore_label==labels[label_idx]):
-#                             enc_labels.append(tag2id[labels[label_idx]])
-#                         else:
-#                             enc_labels.append(-100)
-#                         label_idx = label_idx + 1
-#                     else:
-#                         enc_labels.append(-100)
-#                 else:
-#                     if wid != wids[index+1]: # Only label the last token of a given word.
-#                         if not (self.ignore_label is not None and self.ignore_label==labels[label_idx]):
-#                             enc_labels.append(tag2id[labels[label_idx]])
-#                         else:
-#                             enc_labels.append(-100)
-#                         label_idx = label_idx + 1
-#                     else:
-#                         enc_labels.append(-100)
-
-#         encodings['labels'] = enc_labels
-#         return encodings
     
     def flatten_list(self, nested_list):
         flattened = []
@@ -297,7 +267,7 @@ class Classifier:
         }
         
     def train_classifier(self,output_model,train_dataset, tag2id,id2tag,eval_dataset=None, 
-                          epochs=3,batch_size=16,learning_rate=5e-5, training_args=None):
+                          epochs=3,batch_size=16,learning_rate=5e-5, training_args=None, resume_from_checkpoint=None, monitor_metric='sklearn', do_hypopt=None):
         
         data_collator = DataCollatorForTokenClassification(tokenizer=self.tokenizer)        
         self.config = AutoConfig.from_pretrained(self.transformer_path, num_labels=len(tag2id), id2label=id2tag, label2id=tag2id)
@@ -306,7 +276,7 @@ class Classifier:
         if training_args == None:
             training_args = TrainingArguments(output_dir=output_model,num_train_epochs=epochs,per_device_train_batch_size=batch_size,learning_rate=learning_rate,save_strategy='no')
         else:
-                            training_args = training_args
+            training_args = training_args
         if eval_dataset == None:
             trainer = Trainer(model=self.classifier_model,
                               args=training_args,
@@ -314,18 +284,50 @@ class Classifier:
                               tokenizer=self.tokenizer,
                               data_collator=data_collator)
         else:
-            
-            trainer = Trainer(model=self.classifier_model,
-              args=training_args,
-              train_dataset=train_dataset,
-              eval_dataset=eval_dataset,
-              compute_metrics=self.compute_metrics,
-              tokenizer=self.tokenizer,
-              data_collator=data_collator,
-              callbacks = [EarlyStoppingCallback(early_stopping_patience=3)]
-              )
-        trainer.train()
-#         trainer.model.save_pretrained(save_directory=trainer.args.output_dir)
+            if do_hypopt == None:
+                trainer = Trainer(model=self.classifier_model,
+                args=training_args,
+                train_dataset=train_dataset,
+                eval_dataset=eval_dataset,
+                compute_metrics=self.compute_metrics(metric=monitor_metric),
+                tokenizer=self.tokenizer,
+                data_collator=data_collator,
+                callbacks = [EarlyStoppingCallback(early_stopping_patience=3)]
+                )
+            else:
+                assert type(do_hypopt) == dict
+                trainer = Trainer(
+                    model=self.model_init(tag2id, id2tag),
+                    args=training_args,
+                    train_dataset=train_dataset,
+                    eval_dataset=eval_dataset,
+                    compute_metrics=self.compute_metrics(metric=monitor_metric),
+                    tokenizer=self.tokenizer,
+                    data_collator=data_collator,
+                )
+
+                best_trial = trainer.hyperparameter_search(
+                    # need to fix that this also works with other backends
+                    direction="maximize",
+                    backend="wandb",
+                    hp_space=do_hypopt,
+                    n_trials=10,
+                )
+                
+                for key, value in best_trial['hyperparameters'].items():
+                    setattr(training_args, key, value)
+
+                trainer = Trainer(model=self.classifier_model,
+                args=training_args,
+                train_dataset=train_dataset,
+                eval_dataset=eval_dataset,
+                compute_metrics=self.compute_metrics(metric=monitor_metric),
+                tokenizer=self.tokenizer,
+                data_collator=data_collator,
+                )
+        
+        trainer.train(resume_from_checkpoint=resume_from_checkpoint)
+        trainer.model.save_pretrained(save_directory=trainer.args.output_dir)
             
     def predict(self,test_data,model_dir=None,batch_size=16,labelname='MISC', max_length=512):        
         ##Only works when padding is set to the right!!! See below
@@ -409,6 +411,7 @@ if __name__ == '__main__':
     arg_parser.add_argument('transformer_path',help='path to the transformer model')
     arg_parser.add_argument('model_dir',help='path of classifier model')
     arg_parser.add_argument('--tokenizer_path',help='path to the tokenizer (defaults to the path of the transformer model)')
+    arg_parser.add_argument('--add_prefix_space',help='wether or not to add a prefix (necessary for robertafast tokenizer when working with pretokenized input)', type=bool, default=False)
     arg_parser.add_argument('--training_data',help='classifier training data')
     arg_parser.add_argument('--test_data',help='classifier test data')
     arg_parser.add_argument('--output_file',help='classified data')
@@ -432,7 +435,7 @@ if __name__ == '__main__':
         if args.training_data == None:
             print('Training data is missing')
         else:
-            classifier = Classifier(args.transformer_path,args.model_dir,args.tokenizer_path,args.training_data,args.test_data,args.ignore_label,args.unknown_label,args.data_preset,feature_cols)
+            classifier = Classifier(args.transformer_path,args.model_dir,args.tokenizer_path,training_data=args.training_data,test_data=args.test_data,ignore_label=args.ignore_label,unknown_label=args.unknown_label,data_preset=args.data_preset,feature_cols=feature_cols, add_prefix_space=args.add_prefix_space)
             tokens, tags = classifier.reader.read_tags('MISC', classifier.training_data, in_feats=False,return_wids=False)
             tag_dict = {'MISC':tags}
             tokens_norm = tokens
@@ -447,7 +450,7 @@ if __name__ == '__main__':
         if args.test_data == None:
             print('Test data is missing')
         else:
-            classifier = Classifier(args.transformer_path,args.model_dir,args.tokenizer_path,args.training_data,args.test_data,args.ignore_label,args.unknown_label,args.data_preset,feature_cols)
+            classifier = Classifier(args.transformer_path,args.model_dir,args.tokenizer_path,training_data=args.training_data,test_data=args.test_data,ignore_label=args.ignore_label,unknown_label=args.unknown_label,data_preset=args.data_preset,feature_cols=feature_cols, add_prefix_space=args.add_prefix_space)
             wids, tokens, tags = classifier.reader.read_tags('MISC', classifier.test_data, False)
             tags_dict = {'MISC':tags}
             tokens_norm = tokens
