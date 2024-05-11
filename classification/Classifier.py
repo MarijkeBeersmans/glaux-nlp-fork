@@ -276,7 +276,7 @@ class Classifier:
         return f1 
         
     def train_classifier(self,output_model,train_dataset, tag2id,id2tag,eval_dataset=None, 
-                          epochs=3,batch_size=16,learning_rate=5e-5, training_args=None, resume_from_checkpoint=None, do_hypopt=False, hypopt_num=10):
+                          epochs=3,batch_size=16,learning_rate=5e-5, training_args=None, resume_from_checkpoint=None, do_early_stopping=False, do_hypopt=False, hypopt_num=10):
         
         data_collator = DataCollatorForTokenClassification(tokenizer=self.tokenizer)        
         self.config = AutoConfig.from_pretrained(self.transformer_path, num_labels=len(tag2id), id2label=id2tag, label2id=tag2id)
@@ -295,15 +295,26 @@ class Classifier:
                               data_collator=data_collator)
         else:
             if do_hypopt == False:
-                trainer = Trainer(model=self.classifier_model,
-                args=training_args,
-                train_dataset=train_dataset,
-                eval_dataset=eval_dataset,
-                compute_metrics=self.compute_metrics,
-                tokenizer=self.tokenizer,
-                data_collator=data_collator,
-                callbacks = [EarlyStoppingCallback(early_stopping_patience=3)]
-                )
+                if do_early_stopping==True:
+                    trainer = Trainer(model=self.classifier_model,
+                    args=training_args,
+                    train_dataset=train_dataset,
+                    eval_dataset=eval_dataset,
+                    compute_metrics=self.compute_metrics,
+                    tokenizer=self.tokenizer,
+                    data_collator=data_collator,
+                    callbacks = [EarlyStoppingCallback(early_stopping_patience=3)]
+                    )
+                else:
+                    trainer = Trainer(model=self.classifier_model,
+                    args=training_args,
+                    train_dataset=train_dataset,
+                    eval_dataset=eval_dataset,
+                    compute_metrics=self.compute_metrics,
+                    tokenizer=self.tokenizer,
+                    data_collator=data_collator,
+                    )
+
             else:
                 trainer = Trainer(
                     model=None,
@@ -327,6 +338,10 @@ class Classifier:
                 for key, value in best_trial.hyperparameters.items():
                     print(key, value)
                     setattr(training_args, key, value)
+                training_args_str = training_args.to_json_string()
+                output_file = f'/home/pricie/marijkeb/notebooks/Greek_NER_reduced/normal training script/best_hyperparams/final_hyperparams {training_args.run_name}.json'
+                with open(output_file, 'w', encoding='UTF-8') as f:
+                    f.write(training_args_str)
 
                 trainer = Trainer(model=self.classifier_model,
                 args=training_args,
@@ -338,7 +353,7 @@ class Classifier:
                 )
         
         trainer.train(resume_from_checkpoint=resume_from_checkpoint)
-        # trainer.model.save_pretrained(save_directory=trainer.args.output_dir)
+        trainer.model.save_pretrained(save_directory=trainer.args.output_dir)
             
     def predict(self,test_data,model_dir=None,batch_size=16,labelname='MISC', max_length=512):        
         ##Only works when padding is set to the right!!! See below
